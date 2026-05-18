@@ -7,9 +7,10 @@
 它不是生产级 BCR 实现，而是一个便于联调和演示的 PoC，重点覆盖：
 
 - 浏览器扩展读取当前标签页 URL
+- 浏览器扩展同时采集当前标签页的 Cookie、`localStorage`、`sessionStorage` 和 `userAgent`
 - 手动运行的 `bcr-agent` 在本机监听 `http://127.0.0.1:45455`
 - `bcr-agent` 把动作转发给远端 `bcr-client`
-- `bcr-client` 用 `QWebEngineView` 加载页面，并执行整屏/退出整屏
+- `bcr-client` 用 `QWebEngineView` 加载页面，并尽量复用当前标签页的登录态
 
 ## 目录结构
 
@@ -107,6 +108,12 @@ remote/chrome-extension
 
 如果你改过 `manifest.json` 或 `popup.js`，要在扩展页点一次“重新加载”。
 
+这次因为扩展权限变了，还要额外确认浏览器已经接受新权限：
+
+- `cookies`
+- `scripting`
+- `<all_urls>`
+
 ## 如何使用
 
 启动好 `bcr-client` 和 `bcr-agent` 后，点击扩展弹窗里的按钮：
@@ -118,6 +125,27 @@ remote/chrome-extension
 - `测试连接`：发送 `ping`
 
 本地在 `bcr-client` 窗口里按 `Esc` 也可以退出整屏。
+
+### 鉴权会带什么
+
+当前版本会从浏览器当前标签页带这些内容：
+
+- 该 URL 可见的 Cookie
+- 当前页面的 `localStorage`
+- 当前页面的 `sessionStorage`
+- 当前页面的 `userAgent`
+
+### 鉴权不会带什么
+
+这些内容当前不会被完整复制：
+
+- 浏览器扩展自身状态
+- 系统级单点登录
+- 客户端证书
+- 密码管理器自动填充
+- 依赖浏览器进程内存态的登录上下文
+
+所以它更适合 Cookie/Storage 驱动的网站登录态，不适合要求完整浏览器环境复制的场景。
 
 ## HTTP 协议
 
@@ -172,6 +200,14 @@ GET /health
 - `bcr-client` 是否已经启动
 - 防火墙是否允许访问该 TCP 端口
 
-### 3. 当前标签页无法发送
+### 3. 页面打开了，但仍然跳到登录页
+
+这说明站点登录态不只依赖 Cookie/Storage。优先检查：
+
+- 当前站点是否还依赖额外的单点登录跳转
+- 登录态是否绑定了别的域名，而当前标签页 URL 没把那些 Cookie 一起带出来
+- 页面是否依赖浏览器插件、客户端证书或系统身份
+
+### 4. 当前标签页无法发送
 
 扩展当前只允许 `http://` 和 `https://` 页面；`chrome://`、`edge://`、扩展页、空白页不会发送。

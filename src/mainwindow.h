@@ -1,12 +1,14 @@
 #pragma once
 
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMainWindow>
 
 class BcrServer;
 class QLabel;
 class QTcpSocket;
+class QWebEngineScript;
 class QWebEngineView;
 
 class MainWindow : public QMainWindow
@@ -22,7 +24,11 @@ private slots:
     void onCommandReceived(const QJsonObject &message, QTcpSocket *socket);
 
 private:
+    void openUrlWithAuth(const QUrl &url, const QJsonObject &auth, bool fullscreenAfterLoad);
     void applyFullscreen(bool enabled);
+    void applyAuthState(const QUrl &url, const QJsonObject &auth);
+    void installStorageBootstrapScript(const QUrl &url, const QJsonObject &auth);
+    void setCookiesForUrl(const QUrl &url, const QJsonArray &cookies);
     QJsonObject buildStateReply(bool ok, const QString &message = QString()) const;
     void updateWindowTitle();
     void updateStatusLabels();

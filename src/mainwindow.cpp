@@ -2,19 +2,53 @@
 
 #include "bcrserver.h"
 
+#include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
+#include <QNetworkCookie>
 #include <QShortcut>
 #include <QStatusBar>
 #include <QTcpSocket>
 #include <QToolBar>
 #include <QUrl>
+#include <QWebEngineCookieStore>
 #include <QWebEngineFullScreenRequest>
 #include <QWebEnginePage>
+#include <QWebEngineProfile>
+#include <QWebEngineScript>
+#include <QWebEngineScriptCollection>
 #include <QWebEngineView>
 
 namespace {
 
 constexpr auto kProtocolVersion = 1;
+constexpr auto kStorageBootstrapScriptName = "bcr-storage-bootstrap";
+
+QString originString(const QUrl &url)
+{
+    return QStringLiteral("%1://%2%3")
+        .arg(url.scheme(),
+             url.host(),
+             url.port() > 0 ? QStringLiteral(":%1").arg(url.port()) : QString());
+}
+
+QNetworkCookie::SameSite sameSiteFromString(const QString &value)
+{
+    if (value == QStringLiteral("lax")) {
+        return QNetworkCookie::SameSite::Lax;
+    }
+
+    if (value == QStringLiteral("strict")) {
+        return QNetworkCookie::SameSite::Strict;
+    }
+
+    if (value == QStringLiteral("no_restriction")) {
+        return QNetworkCookie::SameSite::None;
+    }
+
+    return QNetworkCookie::SameSite::Default;
+}
 
 }
 
@@ -101,8 +135,8 @@ void MainWindow::onCommandReceived(const QJsonObject &message, QTcpSocket *socke
             return;
         }
 
-        m_view->load(url);
-        m_server->sendReply(socket, buildStateReply(true, QStringLiteral("URL loaded")));
+        openUrlWithAuth(url, message.value(QStringLiteral("auth")).toObject(), false);
+        m_server->sendReply(socket, buildStateReply(true, QStringLiteral("URL loaded with auth state")));
         return;
     }
 
@@ -125,9 +159,8 @@ void MainWindow::onCommandReceived(const QJsonObject &message, QTcpSocket *socke
             return;
         }
 
-        m_view->load(url);
-        applyFullscreen(true);
-        m_server->sendReply(socket, buildStateReply(true, QStringLiteral("URL loaded and fullscreen enabled")));
+        openUrlWithAuth(url, message.value(QStringLiteral("auth")).toObject(), true);
+        m_server->sendReply(socket, buildStateReply(true, QStringLiteral("URL loaded with auth state and fullscreen enabled")));
         return;
     }
 
@@ -137,6 +170,16 @@ void MainWindow::onCommandReceived(const QJsonObject &message, QTcpSocket *socke
     }
 
     m_server->sendReply(socket, buildStateReply(false, QStringLiteral("Unsupported command")));
+}
+
+void MainWindow::openUrlWithAuth(const QUrl &url, const QJsonObject &auth, bool fullscreenAfterLoad)
+{
+    applyAuthState(url, auth);
+    m_view->load(url);
+
+    if (fullscreenAfterLoad) {
+        applyFullscreen(true);
+    }
 }
 
 void MainWindow::applyFullscreen(bool enabled)
@@ -155,6 +198,100 @@ void MainWindow::applyFullscreen(bool enabled)
 
     updateStatusLabels();
     updateWindowTitle();
+}
+
+void MainWindow::applyAuthState(const QUrl &url, const QJsonObject &auth)
+{
+    if (!auth.isEmpty()) {
+        const QString userAgent = auth.value(QStringLiteral("userAgent")).toString().trimmed();
+        if (!userAgent.isEmpty()) {
+            m_view->page()->profile()->setHttpUserAgent(userAgent);
+        }
+
+        setCookiesForUrl(url, auth.value(QStringLiteral("cookies")).toArray());
+    }
+
+    installStorageBootstrapScript(url, auth);
+}
+
+void MainWindow::installStorageBootstrapScript(const QUrl &url, const QJsonObject &auth)
+{
+    auto &scripts = m_view->page()->scripts();
+    for (const QWebEngineScript &existingScript : scripts.find(QString::fromLatin1(kStorageBootstrapScriptName))) {
+        scripts.remove(existingScript);
+    }
+
+    const QJsonObject localStorage = auth.value(QStringLiteral("localStorage")).toObject();
+    const QJsonObject sessionStorage = auth.value(QStringLiteral("sessionStorage")).toObject();
+    if (localStorage.isEmpty() && sessionStorage.isEmpty()) {
+        return;
+    }
+
+    const QJsonObject payload{
+        {QStringLiteral("origin"), originString(url)},
+        {QStringLiteral("localStorage"), localStorage},
+        {QStringLiteral("sessionStorage"), sessionStorage},
+    };
+
+    QWebEngineScript script;
+    script.setName(kStorageBootstrapScriptName);
+    script.setWorldId(QWebEngineScript::MainWorld);
+    script.setInjectionPoint(QWebEngineScript::DocumentCreation);
+    script.setRunsOnSubFrames(false);
+    script.setSourceCode(QString::fromLatin1(R"JS(
+(() => {
+  const payload = %1;
+  if (window.location.origin !== payload.origin) {
+    return;
+  }
+
+  const setStorage = (storage, values) => {
+    storage.clear();
+    for (const [key, value] of Object.entries(values || {})) {
+      storage.setItem(key, String(value));
+    }
+  };
+
+  try {
+    setStorage(window.localStorage, payload.localStorage);
+    setStorage(window.sessionStorage, payload.sessionStorage);
+  } catch (error) {
+    console.error("BCR storage bootstrap failed", error);
+  }
+})();
+)JS").arg(QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact))));
+    scripts.insert(script);
+}
+
+void MainWindow::setCookiesForUrl(const QUrl &url, const QJsonArray &cookies)
+{
+    auto *cookieStore = m_view->page()->profile()->cookieStore();
+    for (const QJsonValue &value : cookies) {
+        if (!value.isObject()) {
+            continue;
+        }
+
+        const QJsonObject object = value.toObject();
+        const QString name = object.value(QStringLiteral("name")).toString();
+        const QString cookieValue = object.value(QStringLiteral("value")).toString();
+        if (name.isEmpty()) {
+            continue;
+        }
+
+        QNetworkCookie cookie(name.toUtf8(), cookieValue.toUtf8());
+        cookie.setDomain(object.value(QStringLiteral("domain")).toString());
+        cookie.setPath(object.value(QStringLiteral("path")).toString(QStringLiteral("/")));
+        cookie.setSecure(object.value(QStringLiteral("secure")).toBool(false));
+        cookie.setHttpOnly(object.value(QStringLiteral("httpOnly")).toBool(false));
+        cookie.setSameSitePolicy(sameSiteFromString(object.value(QStringLiteral("sameSite")).toString()));
+
+        const QJsonValue expirationDate = object.value(QStringLiteral("expirationDate"));
+        if (expirationDate.isDouble()) {
+            cookie.setExpirationDate(QDateTime::fromSecsSinceEpoch(qint64(expirationDate.toDouble())));
+        }
+
+        cookieStore->setCookie(cookie, url);
+    }
 }
 
 QJsonObject MainWindow::buildStateReply(bool ok, const QString &message) const

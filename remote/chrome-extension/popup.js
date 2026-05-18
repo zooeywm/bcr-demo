@@ -5,11 +5,76 @@ async function getActiveTab() {
   return tab;
 }
 
+async function getCookiesForUrl(url) {
+  return chrome.cookies.getAll({ url });
+}
+
+async function getStorageSnapshot(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({
+      localStorage: Object.fromEntries(
+        Array.from({ length: window.localStorage.length }, (_, index) => {
+          const key = window.localStorage.key(index);
+          return [key, window.localStorage.getItem(key) ?? ""];
+        }),
+      ),
+      sessionStorage: Object.fromEntries(
+        Array.from({ length: window.sessionStorage.length }, (_, index) => {
+          const key = window.sessionStorage.key(index);
+          return [key, window.sessionStorage.getItem(key) ?? ""];
+        }),
+      ),
+      userAgent: navigator.userAgent,
+    }),
+  });
+
+  return results?.[0]?.result ?? {
+    localStorage: {},
+    sessionStorage: {},
+    userAgent: "",
+  };
+}
+
+async function buildAuthPayload(tab) {
+  if (!tab?.id || !tab?.url || !/^https?:/i.test(tab.url)) {
+    return null;
+  }
+
+  const [cookies, storageSnapshot] = await Promise.all([
+    getCookiesForUrl(tab.url).catch(() => []),
+    getStorageSnapshot(tab.id).catch(() => ({
+      localStorage: {},
+      sessionStorage: {},
+      userAgent: "",
+    })),
+  ]);
+
+  return {
+    cookies: cookies.map((cookie) => ({
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path,
+      secure: cookie.secure,
+      httpOnly: cookie.httpOnly,
+      sameSite: cookie.sameSite ?? "unspecified",
+      expirationDate: cookie.expirationDate ?? null,
+    })),
+    localStorage: storageSnapshot.localStorage ?? {},
+    sessionStorage: storageSnapshot.sessionStorage ?? {},
+    userAgent: storageSnapshot.userAgent ?? "",
+  };
+}
+
 async function sendAgentRequest(message) {
   let response;
   try {
     response = await fetch(agentEndpoint, {
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(message),
     });
   } catch (error) {
@@ -52,6 +117,7 @@ async function sendAction(action, withUrl = false) {
   const payload = { action };
   if (withUrl) {
     payload.url = tab.url;
+    payload.auth = await buildAuthPayload(tab);
   }
 
   const response = await sendAgentRequest(payload);

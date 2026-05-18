@@ -23,17 +23,27 @@ QJsonObject toTcpMessage(const QJsonObject &request)
 {
     const QString action = request.value(QStringLiteral("action")).toString();
     if (action == QStringLiteral("openUrl")) {
-        return QJsonObject{
+        QJsonObject message{
             {QStringLiteral("type"), QStringLiteral("openUrl")},
             {QStringLiteral("url"), request.value(QStringLiteral("url")).toString()},
         };
+        const QJsonValue auth = request.value(QStringLiteral("auth"));
+        if (auth.isObject()) {
+            message.insert(QStringLiteral("auth"), auth);
+        }
+        return message;
     }
 
     if (action == QStringLiteral("openUrlAndFullscreen")) {
-        return QJsonObject{
+        QJsonObject message{
             {QStringLiteral("type"), QStringLiteral("openUrlAndFullscreen")},
             {QStringLiteral("url"), request.value(QStringLiteral("url")).toString()},
         };
+        const QJsonValue auth = request.value(QStringLiteral("auth"));
+        if (auth.isObject()) {
+            message.insert(QStringLiteral("auth"), auth);
+        }
+        return message;
     }
 
     if (action == QStringLiteral("enterFullscreen")) {
