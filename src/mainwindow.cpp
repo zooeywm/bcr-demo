@@ -21,6 +21,7 @@
 #include <QVBoxLayout>
 #include <QWebEngineCookieStore>
 #include <QWebEngineFullScreenRequest>
+#include <QWebEngineNewWindowRequest>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineScript>
@@ -113,6 +114,10 @@ MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, const QU
     connect(m_view->page(), &QWebEnginePage::fullScreenRequested, this, [this](QWebEngineFullScreenRequest request) {
         request.accept();
         applyFullscreen(request.toggleOn());
+    });
+
+    connect(m_view->page(), &QWebEnginePage::newWindowRequested, this, [this](QWebEngineNewWindowRequest &request) {
+        request.openIn(m_view->page());
     });
 
     auto *exitShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
