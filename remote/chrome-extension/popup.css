@@ -1,0 +1,52 @@
+body {
+  margin: 0;
+  font: 13px/1.4 "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  background: linear-gradient(180deg, #f7f6f2 0%, #ece7dc 100%);
+  color: #1f1c16;
+}
+
+.layout {
+  width: 320px;
+  padding: 16px;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.tab-url {
+  min-height: 56px;
+  margin: 0 0 12px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  word-break: break-all;
+}
+
+button {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: #23413a;
+  color: #fff;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #8a8a85;
+  cursor: not-allowed;
+}
+
+.status {
+  margin: 8px 0 0;
+  padding: 10px;
+  min-height: 84px;
+  border-radius: 10px;
+  background: #161616;
+  color: #d7ffd2;
+  white-space: pre-wrap;
+}

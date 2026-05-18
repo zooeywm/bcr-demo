@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "BCR Demo Controller",
+  "description": "Control the Qt BCR demo client through a local HTTP bcr-agent.",
+  "version": "0.1.0",
+  "permissions": [
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:45455/*"
+  ],
+  "action": {
+    "default_title": "BCR Demo",
+    "default_popup": "popup.html"
+  }
+}
