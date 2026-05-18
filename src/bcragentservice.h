@@ -36,6 +36,7 @@ private:
     QJsonObject healthPayload() const;
     QJsonObject notifyClient(const QJsonObject &message) const;
     QJsonObject buildExtensionSyncMessage() const;
+    bool shouldForwardExtensionState(const QJsonObject &extensionState) const;
 
     AgentSettings m_settings;
     QTcpServer m_server;

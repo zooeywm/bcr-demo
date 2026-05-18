@@ -10,12 +10,15 @@
 #include <QNetworkCookie>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSignalBlocker>
 #include <QShortcut>
 #include <QStatusBar>
+#include <QTabBar>
 #include <QTcpSocket>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
+#include <QVBoxLayout>
 #include <QWebEngineCookieStore>
 #include <QWebEngineFullScreenRequest>
 #include <QWebEnginePage>
@@ -62,11 +65,22 @@ MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, const QU
     , m_view(new QWebEngineView(this))
     , m_networkAccessManager(new QNetworkAccessManager(this))
     , m_syncTimer(new QTimer(this))
+    , m_tabBar(new QTabBar(this))
     , m_connectionLabel(new QLabel(this))
     , m_urlLabel(new QLabel(this))
     , m_agentBaseUrl(agentBaseUrl)
 {
-    setCentralWidget(m_view);
+    auto *central = new QWidget(this);
+    auto *layout = new QVBoxLayout(central);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_tabBar->setDocumentMode(true);
+    m_tabBar->setMovable(false);
+    m_tabBar->setExpanding(false);
+    m_tabBar->setDrawBase(false);
+    layout->addWidget(m_tabBar);
+    layout->addWidget(m_view);
+    setCentralWidget(central);
     resize(1440, 900);
     m_syncTimer->setSingleShot(true);
     m_syncTimer->setInterval(150);
@@ -89,10 +103,12 @@ MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, const QU
     });
 
     connect(m_view, &QWebEngineView::titleChanged, this, [this] {
+        rebuildTabBar();
         scheduleStateSync();
     });
 
     connect(m_syncTimer, &QTimer::timeout, this, &MainWindow::syncStateToAgent);
+    connect(m_tabBar, &QTabBar::currentChanged, this, &MainWindow::onTabSelected);
 
     connect(m_view->page(), &QWebEnginePage::fullScreenRequested, this, [this](QWebEngineFullScreenRequest request) {
         request.accept();
@@ -116,6 +132,7 @@ MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, const QU
 
     updateStatusLabels();
     updateWindowTitle();
+    rebuildTabBar();
 }
 
 void MainWindow::onClientConnected(const QString &peer)
@@ -194,6 +211,7 @@ void MainWindow::onCommandReceived(const QJsonObject &message, QTcpSocket *socke
 
         m_remoteTabs = message.value(QStringLiteral("tabs")).toArray();
         openUrlWithAuth(url, message.value(QStringLiteral("auth")).toObject(), false);
+        rebuildTabBar();
         m_server->sendReply(socket, buildStateReply(true, QStringLiteral("Browser state synced")));
         return;
     }
@@ -323,6 +341,67 @@ void MainWindow::setCookiesForUrl(const QUrl &url, const QJsonArray &cookies)
     }
 }
 
+void MainWindow::rebuildTabBar()
+{
+    m_rebuildingTabBar = true;
+    QSignalBlocker blocker(m_tabBar);
+    while (m_tabBar->count() > 0) {
+        m_tabBar->removeTab(0);
+    }
+
+    int currentIndex = -1;
+    const QString currentUrl = m_view->url().toString();
+
+    if (m_remoteTabs.isEmpty()) {
+        const QString label = m_view->title().isEmpty() ? QStringLiteral("当前页面") : m_view->title();
+        m_tabBar->addTab(label);
+        m_tabBar->setTabData(0, currentUrl);
+        m_tabBar->setCurrentIndex(0);
+        m_rebuildingTabBar = false;
+        return;
+    }
+
+    for (const QJsonValue &value : m_remoteTabs) {
+        if (!value.isObject()) {
+            continue;
+        }
+
+        const QJsonObject tab = value.toObject();
+        const QString url = tab.value(QStringLiteral("url")).toString();
+        const QString title = tab.value(QStringLiteral("title")).toString();
+        const int index = m_tabBar->addTab(title.isEmpty() ? QStringLiteral("未命名标签页") : title);
+        m_tabBar->setTabData(index, url);
+
+        if (url == currentUrl || tab.value(QStringLiteral("active")).toBool(false)) {
+            currentIndex = index;
+        }
+    }
+
+    if (m_tabBar->count() == 0) {
+        m_tabBar->addTab(QStringLiteral("当前页面"));
+        m_tabBar->setTabData(0, currentUrl);
+        currentIndex = 0;
+    }
+
+    m_tabBar->setCurrentIndex(currentIndex >= 0 ? currentIndex : 0);
+    m_rebuildingTabBar = false;
+}
+
+void MainWindow::onTabSelected(int index)
+{
+    if (m_rebuildingTabBar || index < 0) {
+        return;
+    }
+
+    const QString urlText = m_tabBar->tabData(index).toString().trimmed();
+    const QUrl url = QUrl::fromUserInput(urlText);
+    if (!url.isValid() || url.scheme().isEmpty() || url == m_view->url()) {
+        return;
+    }
+
+    m_view->load(url);
+}
+
 void MainWindow::scheduleStateSync()
 {
     if (!m_agentBaseUrl.isValid() || m_view->url().isEmpty()) {
@@ -350,6 +429,20 @@ void MainWindow::syncStateToAgent()
             {QStringLiteral("title"), m_view->title()},
             {QStringLiteral("active"), true},
         });
+    } else {
+        for (int i = 0; i < tabs.size(); ++i) {
+            if (!tabs[i].isObject()) {
+                continue;
+            }
+
+            QJsonObject tab = tabs[i].toObject();
+            const bool isCurrent = tab.value(QStringLiteral("url")).toString() == m_view->url().toString();
+            tab.insert(QStringLiteral("active"), isCurrent);
+            if (isCurrent) {
+                tab.insert(QStringLiteral("title"), m_view->title());
+            }
+            tabs[i] = tab;
+        }
     }
 
     const QJsonObject payload{

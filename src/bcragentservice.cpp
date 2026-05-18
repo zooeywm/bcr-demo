@@ -234,6 +234,23 @@ QJsonObject BcrAgentService::buildExtensionSyncMessage() const
     return toClientSyncMessage(m_latestExtensionState);
 }
 
+bool BcrAgentService::shouldForwardExtensionState(const QJsonObject &extensionState) const
+{
+    const QString desiredUrl = m_latestDesiredState.value(QStringLiteral("desiredUrl")).toString().trimmed();
+    if (desiredUrl.isEmpty()) {
+        return true;
+    }
+
+    const double updatedAt = m_latestDesiredState.value(QStringLiteral("updatedAt")).toDouble(0);
+    const qint64 ageMs = QDateTime::currentMSecsSinceEpoch() - qint64(updatedAt);
+    if (ageMs > 5000) {
+        return true;
+    }
+
+    const QString activeUrl = extensionState.value(QStringLiteral("activeTab")).toObject().value(QStringLiteral("url")).toString().trimmed();
+    return activeUrl == desiredUrl;
+}
+
 void BcrAgentService::onNewConnection()
 {
     while (QTcpSocket *socket = m_server.nextPendingConnection()) {
@@ -350,11 +367,18 @@ void BcrAgentService::processRequest(QTcpSocket *socket, QByteArray &buffer)
             m_latestExtensionState = request;
             QJsonObject syncResponse;
             bool forwarded = false;
-            try {
-                syncResponse = notifyClient(buildExtensionSyncMessage());
-                forwarded = syncResponse.value(QStringLiteral("ok")).toBool(false);
-            } catch (const QString &error) {
-                syncResponse = buildErrorResponse(error);
+            if (shouldForwardExtensionState(request)) {
+                try {
+                    syncResponse = notifyClient(buildExtensionSyncMessage());
+                    forwarded = syncResponse.value(QStringLiteral("ok")).toBool(false);
+                } catch (const QString &error) {
+                    syncResponse = buildErrorResponse(error);
+                }
+            } else {
+                syncResponse = QJsonObject{
+                    {QStringLiteral("ok"), true},
+                    {QStringLiteral("message"), QStringLiteral("Ignored stale browser state while waiting for desired URL")},
+                };
             }
             sendHttpResponse(socket,
                              200,

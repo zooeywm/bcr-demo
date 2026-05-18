@@ -8,6 +8,7 @@
 class BcrServer;
 class QLabel;
 class QNetworkAccessManager;
+class QTabBar;
 class QTimer;
 class QTcpSocket;
 class QWebEngineScript;
@@ -24,6 +25,7 @@ private slots:
     void onClientConnected(const QString &peer);
     void onClientDisconnected(const QString &peer);
     void onCommandReceived(const QJsonObject &message, QTcpSocket *socket);
+    void onTabSelected(int index);
 
 private:
     void openUrlWithAuth(const QUrl &url, const QJsonObject &auth, bool fullscreenAfterLoad);
@@ -31,6 +33,7 @@ private:
     void applyAuthState(const QUrl &url, const QJsonObject &auth);
     void installStorageBootstrapScript(const QUrl &url, const QJsonObject &auth);
     void setCookiesForUrl(const QUrl &url, const QJsonArray &cookies);
+    void rebuildTabBar();
     void scheduleStateSync();
     void syncStateToAgent();
     QJsonObject buildStateReply(bool ok, const QString &message = QString()) const;
@@ -41,10 +44,12 @@ private:
     QWebEngineView *m_view;
     QNetworkAccessManager *m_networkAccessManager;
     QTimer *m_syncTimer;
+    QTabBar *m_tabBar;
     QLabel *m_connectionLabel;
     QLabel *m_urlLabel;
     QUrl m_agentBaseUrl;
     QJsonArray m_remoteTabs;
+    bool m_rebuildingTabBar = false;
     QString m_lastPeer;
     bool m_isFullscreen = false;
 };
