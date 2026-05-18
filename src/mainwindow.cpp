@@ -6,10 +6,14 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QNetworkAccessManager>
 #include <QNetworkCookie>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QShortcut>
 #include <QStatusBar>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QToolBar>
 #include <QUrl>
 #include <QWebEngineCookieStore>
@@ -52,15 +56,20 @@ QNetworkCookie::SameSite sameSiteFromString(const QString &value)
 
 }
 
-MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, QWidget *parent)
+MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, const QUrl &agentBaseUrl, QWidget *parent)
     : QMainWindow(parent)
     , m_server(new BcrServer(this))
     , m_view(new QWebEngineView(this))
+    , m_networkAccessManager(new QNetworkAccessManager(this))
+    , m_syncTimer(new QTimer(this))
     , m_connectionLabel(new QLabel(this))
     , m_urlLabel(new QLabel(this))
+    , m_agentBaseUrl(agentBaseUrl)
 {
     setCentralWidget(m_view);
     resize(1440, 900);
+    m_syncTimer->setSingleShot(true);
+    m_syncTimer->setInterval(150);
 
     auto *toolbar = addToolBar(QStringLiteral("BCR"));
     toolbar->setMovable(false);
@@ -76,7 +85,14 @@ MainWindow::MainWindow(const QHostAddress &listenAddress, quint16 port, QWidget 
     connect(m_view, &QWebEngineView::urlChanged, this, [this] {
         updateStatusLabels();
         updateWindowTitle();
+        scheduleStateSync();
     });
+
+    connect(m_view, &QWebEngineView::titleChanged, this, [this] {
+        scheduleStateSync();
+    });
+
+    connect(m_syncTimer, &QTimer::timeout, this, &MainWindow::syncStateToAgent);
 
     connect(m_view->page(), &QWebEnginePage::fullScreenRequested, this, [this](QWebEngineFullScreenRequest request) {
         request.accept();
@@ -166,6 +182,19 @@ void MainWindow::onCommandReceived(const QJsonObject &message, QTcpSocket *socke
 
     if (type == QStringLiteral("ping")) {
         m_server->sendReply(socket, buildStateReply(true, QStringLiteral("pong")));
+        return;
+    }
+
+    if (type == QStringLiteral("syncBrowserState")) {
+        const QUrl url = QUrl::fromUserInput(message.value(QStringLiteral("url")).toString().trimmed());
+        if (!url.isValid() || url.scheme().isEmpty()) {
+            m_server->sendReply(socket, buildStateReply(false, QStringLiteral("Invalid sync URL")));
+            return;
+        }
+
+        m_remoteTabs = message.value(QStringLiteral("tabs")).toArray();
+        openUrlWithAuth(url, message.value(QStringLiteral("auth")).toObject(), false);
+        m_server->sendReply(socket, buildStateReply(true, QStringLiteral("Browser state synced")));
         return;
     }
 
@@ -292,6 +321,48 @@ void MainWindow::setCookiesForUrl(const QUrl &url, const QJsonArray &cookies)
 
         cookieStore->setCookie(cookie, url);
     }
+}
+
+void MainWindow::scheduleStateSync()
+{
+    if (!m_agentBaseUrl.isValid() || m_view->url().isEmpty()) {
+        return;
+    }
+
+    m_syncTimer->start();
+}
+
+void MainWindow::syncStateToAgent()
+{
+    if (!m_agentBaseUrl.isValid() || m_view->url().isEmpty()) {
+        return;
+    }
+
+    const QUrl endpoint = m_agentBaseUrl.resolved(QUrl(QStringLiteral("/client/state")));
+    QNetworkRequest request(endpoint);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+
+    QJsonArray tabs = m_remoteTabs;
+    if (tabs.isEmpty()) {
+        tabs.append(QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("client-main")},
+            {QStringLiteral("url"), m_view->url().toString()},
+            {QStringLiteral("title"), m_view->title()},
+            {QStringLiteral("active"), true},
+        });
+    }
+
+    const QJsonObject payload{
+        {QStringLiteral("url"), m_view->url().toString()},
+        {QStringLiteral("title"), m_view->title()},
+        {QStringLiteral("tabs"), tabs},
+        {QStringLiteral("updatedAt"), double(QDateTime::currentMSecsSinceEpoch())},
+    };
+
+    auto *reply = m_networkAccessManager->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [reply] {
+        reply->deleteLater();
+    });
 }
 
 QJsonObject MainWindow::buildStateReply(bool ok, const QString &message) const

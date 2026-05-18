@@ -1,16 +1,18 @@
 # BCR Demo
 
-这是一个最小可闭环的 BCR 演示工程，链路如下：
+这是一个最小可闭环的 BCR 演示工程，当前链路如下：
 
-`Chrome/Edge 扩展 -> 手动启动的 bcr-agent (本地 HTTP) -> TCP -> Qt WebEngine 客户端`
+`服务端浏览器插件 -> bcr-agent -> bcr-client -> bcr-agent -> 服务端浏览器当前活动标签页`
 
-它不是生产级 BCR 实现，而是一个便于联调和演示的 PoC，重点覆盖：
+这版的目标不是“把浏览器完整搬到客户端”，而是：
 
-- 浏览器扩展读取当前标签页 URL
-- 浏览器扩展同时采集当前标签页的 Cookie、`localStorage`、`sessionStorage` 和 `userAgent`
-- 手动运行的 `bcr-agent` 在本机监听 `http://127.0.0.1:45455`
-- `bcr-agent` 把动作转发给远端 `bcr-client`
-- `bcr-client` 用 `QWebEngineView` 加载页面，并尽量复用当前标签页的登录态
+- 服务端浏览器负责保留真实登录态
+- 插件自动把当前活动标签页的 `url/tabs/auth snapshot` 同步给 `bcr-agent`
+- `bcr-agent` 自动把这份状态推给 `bcr-client`
+- `bcr-client` 负责主导后续 URL 和跳转
+- `bcr-client` 的 URL 变化会回推给 `bcr-agent`
+- 服务端浏览器当前活动标签页自动跟随客户端 URL
+- 服务端网页内容被插件直接白屏覆盖，只保留浏览器壳和登录上下文
 
 ## 目录结构
 
@@ -25,6 +27,8 @@
 │   └── mainwindow.*
 └── remote
     └── chrome-extension
+        ├── background.js
+        ├── content.js
         ├── manifest.json
         ├── popup.css
         ├── popup.html
@@ -33,7 +37,7 @@
 
 ## 构建
 
-环境目标是 Qt `6.8.3`。
+目标环境是 Qt `6.8.3`。
 
 ```bash
 cmake -S . -B build
@@ -43,61 +47,60 @@ cmake --build build -j
 会生成两个二进制：
 
 - `build/bcr-client`：Qt WebEngine 客户端
-- `build/bcr-agent`：手动运行的本地 HTTP 转发器
+- `build/bcr-agent`：运行在服务端浏览器机器上的状态中枢
 
 ## 启动顺序
 
-### 1. 启动 `bcr-client`
+### 1. 在服务端浏览器机器启动 `bcr-agent`
 
-在展示机或被控机上运行：
+因为浏览器插件要访问本机 `127.0.0.1`，而远端 `bcr-client` 也要访问这台机器的 agent，所以最稳的启动方式是让 agent 监听所有网卡：
+
+Linux/macOS：
 
 ```bash
-./build/bcr-client --address 0.0.0.0 --port 45454
+./build/bcr-agent \
+  --listen-address 0.0.0.0 \
+  --listen-port 45455 \
+  --client-host 192.168.1.10 \
+  --client-port 45454
+```
+
+Windows PowerShell：
+
+```powershell
+.\build\bcr-agent.exe `
+  --listen-address 0.0.0.0 `
+  --listen-port 45455 `
+  --client-host 192.168.1.10 `
+  --client-port 45454
 ```
 
 说明：
 
-- `--address` 是 `bcr-client` 监听地址，远程浏览器机器需要能访问到它
-- `--port` 是 `bcr-client` 监听端口，默认 `45454`
+- `--listen-address 0.0.0.0`：这样浏览器本机能通过 `127.0.0.1:45455` 访问 agent，远端 `bcr-client` 也能通过这台机器的实际 IP 访问 agent
+- `--listen-port 45455`：插件默认写死访问这个端口
+- `--client-host` / `--client-port`：指向 `bcr-client` 的监听地址
 
-### 2. 在浏览器机器上手动启动 `bcr-agent`
-
-`bcr-agent` 默认监听本机：
-
-- `http://127.0.0.1:45455/command`
-
-你需要把它指向 `bcr-client` 的 IP 和端口。
-
-Linux/macOS 示例：
+### 2. 在客户端机器启动 `bcr-client`
 
 ```bash
-./build/bcr-agent --client-host 192.168.1.10 --client-port 45454
+./build/bcr-client \
+  --address 0.0.0.0 \
+  --port 45454 \
+  --agent-base-url http://192.168.1.20:45455
 ```
 
-Windows PowerShell 示例：
+说明：
 
-```powershell
-.\build\bcr-agent.exe --client-host 192.168.1.10 --client-port 45454
-```
+- `--address` / `--port`：`bcr-client` 自己的 TCP 监听地址
+- `--agent-base-url`：指向服务端浏览器机器上的 `bcr-agent`
+- 这里的 `192.168.1.20` 要换成运行 `bcr-agent` 那台机器的局域网 IP
 
-这里的 `192.168.1.10` 要换成运行 `bcr-client` 那台机器的 IP。
+### 3. 在服务端浏览器加载扩展
 
-可选参数：
+Chrome 和 Edge 都按已解压扩展加载：
 
-- `--listen-address 127.0.0.1`：本机 HTTP 监听地址，默认 `127.0.0.1`
-- `--listen-port 45455`：本机 HTTP 监听端口，默认 `45455`
-- `--timeout-ms 3000`：转发到 `bcr-client` 的超时
-
-注意：
-
-- 扩展当前写死访问 `http://127.0.0.1:45455`
-- 如果你改了 `--listen-port` 或 `--listen-address`，就必须同步修改 [remote/chrome-extension/popup.js](/home/zooeywm/repos/qt/bcr-demo/remote/chrome-extension/popup.js:1) 里的 `agentEndpoint`
-
-### 3. 加载浏览器扩展
-
-Chrome 和 Edge 都按已解压扩展加载即可，不再需要 Native Messaging 注册表或安装脚本。
-
-1. 打开浏览器扩展页
+1. 打开扩展页
 2. 开启 `开发者模式`
 3. 选择 `加载已解压的扩展程序`
 4. 选中目录：
@@ -106,108 +109,131 @@ Chrome 和 Edge 都按已解压扩展加载即可，不再需要 Native Messagin
 remote/chrome-extension
 ```
 
-如果你改过 `manifest.json` 或 `popup.js`，要在扩展页点一次“重新加载”。
+这次扩展是后台自动工作的，不需要手动点 popup。
 
-这次因为扩展权限变了，还要额外确认浏览器已经接受新权限：
+如果你改过扩展代码，要在扩展页点一次“重新加载”。
 
-- `cookies`
-- `scripting`
-- `<all_urls>`
+### 4. 打开服务端浏览器页面
 
-## 如何使用
+只要服务端浏览器打开普通 `http/https` 页面，插件后台就会自动：
 
-启动好 `bcr-client` 和 `bcr-agent` 后，点击扩展弹窗里的按钮：
+- 采集当前活动标签页的 URL
+- 采集当前活动标签页的 Cookie / `localStorage` / `sessionStorage` / `userAgent`
+- 把 `tabs` 元数据和鉴权快照发给 `bcr-agent`
+- `bcr-agent` 自动把这份状态推给 `bcr-client`
 
-- `在 Qt 中打开当前页`：把当前标签页 URL 发给 `bcr-client`
-- `打开当前页并整屏`：打开 URL 后立即整屏
-- `仅切到整屏`：不改 URL，只切整屏
-- `退出整屏`：让 `bcr-client` 退出整屏
-- `测试连接`：发送 `ping`
+所以这一版不再依赖手动点击扩展弹窗。
 
-本地在 `bcr-client` 窗口里按 `Esc` 也可以退出整屏。
+## 当前行为
 
-### 鉴权会带什么
+### 浏览器端
 
-当前版本会从浏览器当前标签页带这些内容：
+- 当前活动标签页网页内容会被白色覆盖层遮住
+- 浏览器地址栏、标签栏、菜单栏不会被清空
+- 插件会持续把当前活动标签页状态同步给 `bcr-agent`
+- 当前活动标签页会轮询 `desired-state`，并自动跟随客户端 URL
 
-- 该 URL 可见的 Cookie
-- 当前页面的 `localStorage`
-- 当前页面的 `sessionStorage`
-- 当前页面的 `userAgent`
+### 客户端
 
-### 鉴权不会带什么
+- 收到服务端浏览器状态后，会自动打开对应 URL
+- 会尽量注入服务端浏览器当前标签页的 Cookie / `localStorage` / `sessionStorage` / `userAgent`
+- 用户在 `bcr-client` 内继续点击、跳转后，会把新 URL 回推给 `bcr-agent`
+- 服务端浏览器当前活动标签页随后会跟随这个 URL
 
-这些内容当前不会被完整复制：
+## 会同步什么
 
-- 浏览器扩展自身状态
+当前自动同步的内容：
+
+- 当前活动标签页 URL
+- 当前窗口 tabs 元数据
+- 当前活动标签页可见 Cookie
+- 当前活动标签页 `localStorage`
+- 当前活动标签页 `sessionStorage`
+- 当前活动标签页 `userAgent`
+
+## 不会同步什么
+
+这版不会完整复制下面这些东西：
+
+- 浏览器壳本身
+- 浏览器插件自己的内部状态
 - 系统级单点登录
 - 客户端证书
 - 密码管理器自动填充
-- 依赖浏览器进程内存态的登录上下文
+- 完整多标签页拓扑控制
 
-所以它更适合 Cookie/Storage 驱动的网站登录态，不适合要求完整浏览器环境复制的场景。
+注意最后一点：
 
-## HTTP 协议
+- 当前已经会同步 `tabs` 元数据
+- 但真正自动控制的只有“当前活动标签页 URL”
+- 不会自动在服务端创建/关闭/重排整套 tab 结构
 
-扩展向 `bcr-agent` 发送：
+## HTTP 接口
+
+### 插件 -> agent
 
 ```http
-POST /command
+POST /extension/state
 ```
 
-请求体 JSON：
+发送当前活动标签页 URL、tabs 元数据和 auth snapshot。
 
-```json
-{"action":"openUrl","url":"https://www.qt.io"}
-{"action":"openUrlAndFullscreen","url":"https://www.qt.io"}
-{"action":"enterFullscreen"}
-{"action":"exitFullscreen"}
-{"action":"ping"}
+### client -> agent
+
+```http
+POST /client/state
 ```
 
-`bcr-agent` 再把它转成一行一个 JSON 发给 `bcr-client`：
+发送客户端当前 URL 和 tabs 元数据，作为服务端浏览器活动标签页的期望状态。
 
-```json
-{"type":"openUrl","url":"https://www.qt.io"}
-{"type":"openUrlAndFullscreen","url":"https://www.qt.io"}
-{"type":"enterFullscreen"}
-{"type":"exitFullscreen"}
-{"type":"ping"}
+### 浏览器活动标签页 -> agent
+
+```http
+GET /desired-state
 ```
 
-`bcr-agent` 还提供一个简单健康检查：
+当前活动标签页轮询这个接口，拿到客户端最近一次同步过来的目标 URL。
+
+### 诊断
 
 ```http
 GET /health
 ```
 
+会返回：
+
+- agent 监听地址
+- client 地址
+- 最近一次 `latestDesiredState`
+- 最近一次 `latestExtensionState`
+
 ## 常见问题
 
-### 1. 扩展里提示“无法连接本地 bcr-agent”
+### 1. 服务端浏览器打开了，但客户端没自动跳
 
-说明扩展没连上 `http://127.0.0.1:45455`。检查：
+优先检查：
 
-- `bcr-agent` 是否已经手动启动
-- `bcr-agent` 是否监听在 `127.0.0.1:45455`
-- 扩展是否已经重新加载到最新版本
+- `bcr-agent` 是否已经启动
+- 服务端浏览器扩展是否已经重新加载到最新版本
+- 当前页面是否是 `http/https`
+- `bcr-agent` 的 `--client-host` / `--client-port` 是否确实指向 `bcr-client`
 
-### 2. 扩展里提示连接 `bcr-client` 失败
+### 2. 客户端能打开，但服务端浏览器不跟随客户端跳转
 
-说明 `bcr-agent` 已启动，但它连不到远端 `bcr-client`。检查：
+优先检查：
 
-- `--client-host` 是否写成了 `bcr-client` 机器 IP
-- `--client-port` 是否和 `bcr-client` 的监听端口一致
-- `bcr-client` 是否已经启动
-- 防火墙是否允许访问该 TCP 端口
+- `bcr-client` 启动时是否带了 `--agent-base-url`
+- `--agent-base-url` 是否写成了服务端 `bcr-agent` 的真实局域网地址
+- 服务端浏览器当前活动标签页是否还是普通 `http/https` 页面
 
-### 3. 页面打开了，但仍然跳到登录页
+### 3. 页面打开了，但仍然掉到登录页
 
-这说明站点登录态不只依赖 Cookie/Storage。优先检查：
+这说明站点登录态不只依赖 Cookie / Storage。优先检查：
 
-- 当前站点是否还依赖额外的单点登录跳转
-- 登录态是否绑定了别的域名，而当前标签页 URL 没把那些 Cookie 一起带出来
-- 页面是否依赖浏览器插件、客户端证书或系统身份
+- 是否还依赖额外 SSO 跳转
+- 登录态是否绑定了别的域名
+- 是否依赖浏览器插件、客户端证书或系统身份
 
-### 4. 当前标签页无法发送
+### 4. 为什么服务端浏览器没有彻底“全空白”
 
-扩展当前只允许 `http://` 和 `https://` 页面；`chrome://`、`edge://`、扩展页、空白页不会发送。
+因为这版只会把网页内容白屏覆盖，不会修改浏览器地址栏、标签栏和菜单栏。这是当前方案的明确边界。

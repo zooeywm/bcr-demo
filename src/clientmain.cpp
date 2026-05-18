@@ -25,9 +25,13 @@ int main(int argc, char *argv[])
                                         QStringLiteral("Listen port."),
                                         QStringLiteral("port"),
                                         QStringLiteral("45454"));
+    const QCommandLineOption agentBaseUrlOption(QStringList{QStringLiteral("agent-base-url")},
+                                                QStringLiteral("Remote bcr-agent base URL, for example http://192.168.1.20:45455"),
+                                                QStringLiteral("url"));
 
     parser.addOption(addressOption);
     parser.addOption(portOption);
+    parser.addOption(agentBaseUrlOption);
     parser.process(app);
 
     QHostAddress listenAddress;
@@ -43,7 +47,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    MainWindow window(listenAddress, port);
+    const QUrl agentBaseUrl = QUrl::fromUserInput(parser.value(agentBaseUrlOption).trimmed());
+    if (!parser.value(agentBaseUrlOption).trimmed().isEmpty() && !agentBaseUrl.isValid()) {
+        QTextStream(stderr) << "Invalid agent base URL: " << parser.value(agentBaseUrlOption) << '\n';
+        return 1;
+    }
+
+    MainWindow window(listenAddress, port, agentBaseUrl);
     window.show();
 
     return app.exec();

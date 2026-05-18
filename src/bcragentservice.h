@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QJsonObject>
 #include <QObject>
 #include <QTcpServer>
 
@@ -32,8 +33,13 @@ private slots:
 
 private:
     void processRequest(QTcpSocket *socket, QByteArray &buffer);
+    QJsonObject healthPayload() const;
+    QJsonObject notifyClient(const QJsonObject &message) const;
+    QJsonObject buildExtensionSyncMessage() const;
 
     AgentSettings m_settings;
     QTcpServer m_server;
     QHash<QTcpSocket *, QByteArray> m_buffers;
+    QJsonObject m_latestExtensionState;
+    QJsonObject m_latestDesiredState;
 };

@@ -1,6 +1,7 @@
 #include "bcragentservice.h"
 
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -59,6 +60,27 @@ QJsonObject toTcpMessage(const QJsonObject &request)
     }
 
     throw QStringLiteral("Unsupported action: %1").arg(action);
+}
+
+QJsonObject toClientSyncMessage(const QJsonObject &extensionState)
+{
+    const QJsonObject activeTab = extensionState.value(QStringLiteral("activeTab")).toObject();
+    if (activeTab.isEmpty()) {
+        throw QStringLiteral("Missing activeTab in extension state");
+    }
+
+    QJsonObject message{
+        {QStringLiteral("type"), QStringLiteral("syncBrowserState")},
+        {QStringLiteral("url"), activeTab.value(QStringLiteral("url")).toString()},
+        {QStringLiteral("tabs"), extensionState.value(QStringLiteral("tabs")).toArray()},
+    };
+
+    const QJsonValue auth = activeTab.value(QStringLiteral("auth"));
+    if (auth.isObject()) {
+        message.insert(QStringLiteral("auth"), auth);
+    }
+
+    return message;
 }
 
 QJsonObject sendTcpMessage(const AgentSettings &settings, const QJsonObject &message)
@@ -189,6 +211,29 @@ QString BcrAgentService::errorString() const
     return m_server.errorString();
 }
 
+QJsonObject BcrAgentService::healthPayload() const
+{
+    return QJsonObject{
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("listenAddress"), m_settings.listenAddress},
+        {QStringLiteral("listenPort"), int(m_settings.listenPort)},
+        {QStringLiteral("clientHost"), m_settings.clientHost},
+        {QStringLiteral("clientPort"), int(m_settings.clientPort)},
+        {QStringLiteral("latestDesiredState"), m_latestDesiredState},
+        {QStringLiteral("latestExtensionState"), m_latestExtensionState},
+    };
+}
+
+QJsonObject BcrAgentService::notifyClient(const QJsonObject &message) const
+{
+    return sendTcpMessage(m_settings, message);
+}
+
+QJsonObject BcrAgentService::buildExtensionSyncMessage() const
+{
+    return toClientSyncMessage(m_latestExtensionState);
+}
+
 void BcrAgentService::onNewConnection()
 {
     while (QTcpSocket *socket = m_server.nextPendingConnection()) {
@@ -259,14 +304,18 @@ void BcrAgentService::processRequest(QTcpSocket *socket, QByteArray &buffer)
     }
 
     if (method == "GET" && path == "/health") {
+        sendHttpResponse(socket, 200, healthPayload());
+        return;
+    }
+
+    if (method == "GET" && path == "/desired-state") {
         sendHttpResponse(socket,
                          200,
                          QJsonObject{
                              {QStringLiteral("ok"), true},
-                             {QStringLiteral("listenAddress"), m_settings.listenAddress},
-                             {QStringLiteral("listenPort"), int(m_settings.listenPort)},
-                             {QStringLiteral("clientHost"), m_settings.clientHost},
-                             {QStringLiteral("clientPort"), int(m_settings.clientPort)},
+                             {QStringLiteral("desiredUrl"), m_latestDesiredState.value(QStringLiteral("desiredUrl")).toString()},
+                             {QStringLiteral("tabs"), m_latestDesiredState.value(QStringLiteral("tabs")).toArray()},
+                             {QStringLiteral("updatedAt"), m_latestDesiredState.value(QStringLiteral("updatedAt")).toDouble()},
                          });
         return;
     }
@@ -276,23 +325,61 @@ void BcrAgentService::processRequest(QTcpSocket *socket, QByteArray &buffer)
         return;
     }
 
-    if (path != "/command") {
+    if (path != "/command" && path != "/extension/state" && path != "/client/state") {
         sendHttpResponse(socket, 404, buildErrorResponse(QStringLiteral("Unknown endpoint")));
         return;
     }
 
     try {
         const QJsonObject request = parseJsonObject(body, QStringLiteral("Invalid HTTP JSON"));
-        const QJsonObject tcpMessage = toTcpMessage(request);
-        const QJsonObject tcpResponse = sendTcpMessage(m_settings, tcpMessage);
+        if (path == "/command") {
+            const QJsonObject tcpMessage = toTcpMessage(request);
+            const QJsonObject tcpResponse = sendTcpMessage(m_settings, tcpMessage);
 
-        sendHttpResponse(socket,
-                         200,
-                         QJsonObject{
-                             {QStringLiteral("ok"), tcpResponse.value(QStringLiteral("ok")).toBool(false)},
-                             {QStringLiteral("message"), tcpResponse.value(QStringLiteral("message")).toString()},
-                             {QStringLiteral("response"), tcpResponse},
-                         });
+            sendHttpResponse(socket,
+                             200,
+                             QJsonObject{
+                                 {QStringLiteral("ok"), tcpResponse.value(QStringLiteral("ok")).toBool(false)},
+                                 {QStringLiteral("message"), tcpResponse.value(QStringLiteral("message")).toString()},
+                                 {QStringLiteral("response"), tcpResponse},
+                             });
+            return;
+        }
+
+        if (path == "/extension/state") {
+            m_latestExtensionState = request;
+            QJsonObject syncResponse;
+            bool forwarded = false;
+            try {
+                syncResponse = notifyClient(buildExtensionSyncMessage());
+                forwarded = syncResponse.value(QStringLiteral("ok")).toBool(false);
+            } catch (const QString &error) {
+                syncResponse = buildErrorResponse(error);
+            }
+            sendHttpResponse(socket,
+                             200,
+                             QJsonObject{
+                                 {QStringLiteral("ok"), true},
+                                 {QStringLiteral("forwarded"), forwarded},
+                                 {QStringLiteral("response"), syncResponse},
+                             });
+            return;
+        }
+
+        if (path == "/client/state") {
+            m_latestDesiredState = QJsonObject{
+                {QStringLiteral("desiredUrl"), request.value(QStringLiteral("url")).toString()},
+                {QStringLiteral("tabs"), request.value(QStringLiteral("tabs")).toArray()},
+                {QStringLiteral("updatedAt"), request.value(QStringLiteral("updatedAt")).toDouble()},
+            };
+            sendHttpResponse(socket,
+                             200,
+                             QJsonObject{
+                                 {QStringLiteral("ok"), true},
+                                 {QStringLiteral("desiredUrl"), m_latestDesiredState.value(QStringLiteral("desiredUrl")).toString()},
+                             });
+            return;
+        }
     } catch (const QString &error) {
         sendHttpResponse(socket, 502, buildErrorResponse(error));
     }
